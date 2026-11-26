@@ -69,7 +69,7 @@ import {
     visualContextDefaultPartition,
     visualContextMaximumBlocks,
     visualContextPartitionFromBoundaries,
-} from "./h3_chain_plan_core.mjs?v=0.7.12";
+} from "./h3_chain_plan_core.mjs?v=0.7.13";
 import {
     promptRevisionHelp,
     promptRevisionLabel,
