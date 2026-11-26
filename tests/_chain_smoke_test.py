@@ -694,6 +694,34 @@ def main():
     print("trim: separate head overlap and tail H3 padding produce frame-accurate "
           "delivered A/V and unpadded private AV overlap")
 
+    # PNG/WAV export must use the same separated head/padding geometry.
+    class ExportAudioVAE:
+        def decode(self, _latent):
+            return torch.ones((1, 2, 324_000), dtype=torch.float32)
+
+    exported_audio = chain._png_export_audio_record(
+        {
+            "index": 2,
+            "id": "continuation",
+            "raw_frames": 243,
+            "requested_frames": 212,
+            "grid_padding_frames": 9,
+            "head_overlap_frames": 22,
+            "delivered_frames": 212,
+            "continuation_mode": "masked_av",
+        },
+        {"audio": torch.zeros((1, 32, 2, 377), dtype=torch.float32)},
+        ExportAudioVAE(),
+        32_000,
+        "guide",
+    )
+    assert exported_audio["raw_frames"] == 234
+    assert exported_audio["repeated_frames"] == 22
+    assert exported_audio["delivered_frames"] == 212
+    assert int(exported_audio["delivered"].shape[-1]) == round(
+        212 / 24 * 32_000)
+    assert int(exported_audio["overlap"].shape[-1]) == round(
+        234 / 24 * 32_000)
     real_audio_load = chain._load_checkpoint_audio
     try:
         loads = iter([
