@@ -17,8 +17,10 @@ changes.
 }
 ```
 
-Prompts may be multiline strings or arrays of lines. Seconds are rounded up to
-H3's valid `17k+5` frame grid. Use `length` when exact raw frames matter.
+Prompts may be multiline strings or arrays of lines. `duration_seconds`
+specifies the final delivered duration. The compiler adds any incoming head
+context and H3 tail grid padding to the raw generation length; Loop Trim removes
+both. Use `length` when exact raw H3 frames matter.
 
 The [complete format guide](../H3_CHAIN_FORMAT_GUIDE.md) documents every Plan
 and per-scene field, raw versus delivered length, prompt structure, seeds, and
