@@ -574,7 +574,7 @@ def _scene_lip_sync_target(plan: dict[str, Any], shot: dict[str, Any]):
     options = _resolved_lip_sync_options(plan, shot) or {}
     preroll = int(math.ceil(float(options.get("preroll_seconds", 0)) * FPS))
     lookahead = int(math.ceil(float(options.get("lookahead_seconds", 0)) * FPS))
-    repeated = int(shot["raw_frames"]) - int(shot["delivered_frames"])
+    repeated = _head_overlap_frame_count(shot)
     start = int(round(selection["start_seconds"] * FPS)) - repeated
     audio = _scene_lip_sync_window(
         source, start - preroll, int(shot["raw_frames"]) + preroll + lookahead)
@@ -5799,7 +5799,7 @@ def _validate_visual_context_block_windows(
         _shot_visual_context_start_frame(
             holder, "visual_context_blocks[%d].start_frame" % (offset - 1),
             int(source.get("raw_frames", 0)), delivered, frames,
-            prefix_frames)
+            prefix_frames, _head_overlap_frame_count(source))
         prefix_frames += frames
 
 
@@ -6415,8 +6415,7 @@ def _scene_dependency_record(
         shot, int(compatibility.get("context_length", 0)))
     audio_context = _shot_audio_context_length(
         shot, int(compatibility.get("audio_context_length", 0)), context)
-    repeated_frames = max(
-        0, int(shot["raw_frames"]) - int(shot["delivered_frames"]))
+    repeated_frames = _head_overlap_frame_count(shot)
     video_blend = min(
         repeated_frames,
         _shot_video_blend_frames(
@@ -7080,20 +7079,35 @@ def _plan_with_external_context(
                         "H3 scene 1 has %d raw frames, not enough for the "
                         "%d-frame imported-video overlap." % (raw_frames, span))
                 generation_start = -span
-                delivered_frames = raw_frames - span
+                head_overlap = span
             else:
                 generation_start = 0
-                delivered_frames = raw_frames
+                head_overlap = 0
+            if bool(shot.get("duration_compensation")):
+                requested_frames = int(shot.get("requested_frames", raw_frames))
+                raw_frames = _h3_frame_grid_length(requested_frames + head_overlap)
+                shot["raw_frames"] = raw_frames
+                shot["grid_padding_frames"] = raw_frames - requested_frames - head_overlap
+            else:
+                shot["grid_padding_frames"] = 0
+            shot["head_overlap_frames"] = head_overlap
+            delivered_frames = (
+                raw_frames - head_overlap - int(shot.get("grid_padding_frames", 0)))
             shot["external_context_frames"] = span
         elif anchor_mode == "head":
             scene_context = _shot_context_length(shot, default_context)
             generation_start = stitched_frames - scene_context
-            delivered_frames = raw_frames - scene_context
+            head_overlap = scene_context
+            shot["head_overlap_frames"] = head_overlap
+            delivered_frames = (
+                raw_frames - head_overlap - int(shot.get("grid_padding_frames", 0)))
         else:
             generation_start = stitched_frames
-            delivered_frames = raw_frames
+            shot["head_overlap_frames"] = 0
+            delivered_frames = raw_frames - int(shot.get("grid_padding_frames", 0))
         shot["generation_start_frame"] = generation_start
         shot["delivered_frames"] = delivered_frames
+        shot["audio_duration_seconds"] = raw_frames / float(FPS)
         # Scene 1's negative pre-roll comes from the imported video/audio, not
         # from the extension soundtrack. Current Shot builds that composite
         # explicitly and begins the new source track at frame zero.
@@ -7126,7 +7140,8 @@ def _plan_with_external_context(
         _shot_visual_context_start_frame(
             target, "visual_context_start_frame",
             int(source["raw_frames"]), int(source["delivered_frames"]),
-            recent_frames, lead_frames)
+            recent_frames, lead_frames,
+            _head_overlap_frame_count(source))
         if lead_source_index is not None:
             lead_source = prepared["shots"][lead_source_index - 1]
             if int(lead_source["delivered_frames"]) < lead_frames:
@@ -7139,7 +7154,8 @@ def _plan_with_external_context(
             _shot_visual_context_start_frame(
                 target, "visual_context_lead_start_frame",
                 int(lead_source["raw_frames"]),
-                int(lead_source["delivered_frames"]), lead_frames, 0)
+                int(lead_source["delivered_frames"]), lead_frames, 0,
+                _head_overlap_frame_count(lead_source))
 
     prepared["total_delivered_frames"] = stitched_frames
     prepared["plan_hash"] = _fingerprint({
@@ -7291,7 +7307,8 @@ def _retime_review_plan(plan: dict[str, Any]) -> None:
         _shot_visual_context_start_frame(
             target, "visual_context_start_frame",
             int(source["raw_frames"]), int(source["delivered_frames"]),
-            recent_frames, lead_frames)
+            recent_frames, lead_frames,
+            _head_overlap_frame_count(source))
         if lead_source_index is not None:
             lead_source = plan["shots"][lead_source_index - 1]
             if int(lead_source["delivered_frames"]) < lead_frames:
@@ -7697,7 +7714,7 @@ def _normalize_plan(
         })
         requested_frames = (
             int(requested_frames) if requested_frames is not None
-            else int(delivered_frames))
+            else int(raw_frames))
 
         steps = int(item.get("steps", default_steps))
         if steps < 1 or steps > 10000:
@@ -7733,6 +7750,7 @@ def _normalize_plan(
             "requested_frames": requested_frames,
             "grid_padding_frames": grid_padding_frames,
             "head_overlap_frames": head_overlap_frames,
+            "duration_compensation": explicit_length is None,
             "delivered_frames": delivered_frames,
             "generation_start_frame": generation_start_frame,
             "audio_start_seconds": generation_start_frame / float(FPS),
@@ -7962,11 +7980,12 @@ def _normalize_plan(
                     start_holder["start_frame"] = block.get("start_frame")
                 start = _shot_visual_context_start_frame(
                     start_holder, "start_frame", int(source["raw_frames"]),
-                    int(source["delivered_frames"]), frames, prefix_frames)
+                    int(source["delivered_frames"]), frames, prefix_frames,
+                    _head_overlap_frame_count(source))
                 block_default = _native_context_window_starts(
                     int(source["raw_frames"]),
                     int(source["delivered_frames"]), frames,
-                    prefix_frames)[-1]
+                    prefix_frames, _head_overlap_frame_count(source))[-1]
                 normalized = {
                     "source": str(source["id"]),
                     "frames": frames,
@@ -8021,12 +8040,13 @@ def _normalize_plan(
             recent_start = _shot_visual_context_start_frame(
                 target, "visual_context_start_frame",
                 int(source["raw_frames"]), int(source["delivered_frames"]),
-                recent_frames, lead_frames)
+                recent_frames, lead_frames,
+                _head_overlap_frame_count(source))
             if "visual_context_start_frame" in target:
                 recent_default = _native_context_window_starts(
                     int(source["raw_frames"]),
                     int(source["delivered_frames"]), recent_frames,
-                    lead_frames)[-1]
+                    lead_frames, _head_overlap_frame_count(source))[-1]
                 if recent_start == recent_default:
                     target.pop("visual_context_start_frame", None)
                 else:
@@ -8043,12 +8063,13 @@ def _normalize_plan(
                 lead_start = _shot_visual_context_start_frame(
                     target, "visual_context_lead_start_frame",
                     int(lead_source["raw_frames"]),
-                    int(lead_source["delivered_frames"]), lead_frames, 0)
+                    int(lead_source["delivered_frames"]), lead_frames, 0,
+                    _head_overlap_frame_count(lead_source))
                 if "visual_context_lead_start_frame" in target:
                     lead_default = _native_context_window_starts(
                         int(lead_source["raw_frames"]),
                         int(lead_source["delivered_frames"]), lead_frames,
-                        0)[-1]
+                        0, _head_overlap_frame_count(lead_source))[-1]
                     if lead_start == lead_default:
                         target.pop("visual_context_lead_start_frame", None)
                     else:
@@ -8104,12 +8125,13 @@ def _normalize_plan(
         recent_audio_start = _shot_audio_context_start_frame(
             target, "audio_context_start_frame",
             int(audio_source["raw_frames"]),
-            int(audio_source["delivered_frames"]), recent_audio_frames)
+            int(audio_source["delivered_frames"]), recent_audio_frames,
+            _head_overlap_frame_count(audio_source))
         if "audio_context_start_frame" in target:
             recent_default = _audio_context_window_starts(
                 int(audio_source["raw_frames"]),
                 int(audio_source["delivered_frames"]),
-                recent_audio_frames)[-1]
+                recent_audio_frames, _head_overlap_frame_count(audio_source))[-1]
             if recent_audio_start == recent_default:
                 target.pop("audio_context_start_frame", None)
             else:
@@ -8120,12 +8142,14 @@ def _normalize_plan(
                 target, "audio_context_lead_start_frame",
                 int(audio_lead_source["raw_frames"]),
                 int(audio_lead_source["delivered_frames"]),
-                audio_lead_frames)
+                audio_lead_frames,
+                _head_overlap_frame_count(audio_lead_source))
             if "audio_context_lead_start_frame" in target:
                 lead_default = _audio_context_window_starts(
                     int(audio_lead_source["raw_frames"]),
                     int(audio_lead_source["delivered_frames"]),
-                    audio_lead_frames)[-1]
+                    audio_lead_frames,
+                    _head_overlap_frame_count(audio_lead_source))[-1]
                 if lead_audio_start == lead_default:
                     target.pop("audio_context_lead_start_frame", None)
                 else:
