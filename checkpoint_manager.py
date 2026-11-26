@@ -682,6 +682,12 @@ class CheckpointGraphManager:
                                   os.path.isfile(checkpoint_path)),
                         "raw_frames": self._integer(
                             segment.get("raw_frames")),
+                        "requested_frames": self._integer(
+                            segment.get("requested_frames")),
+                        "grid_padding_frames": self._integer(
+                            segment.get("grid_padding_frames")),
+                        "head_overlap_frames": self._integer(
+                            segment.get("head_overlap_frames")),
                         "delivered_frames": self._integer(
                             segment.get("delivered_frames")),
                         "seed": str(segment.get("seed") or ""),
@@ -1260,7 +1266,8 @@ class CheckpointGraphManager:
             item = {name: record[name] for name in (
                 "scene", "scene_id", "revision", "active", "ready",
                 "pointer_active", "inactive_reason",
-                "raw_frames", "delivered_frames", "seed", "steps",
+                "raw_frames", "requested_frames", "grid_padding_frames",
+                "head_overlap_frames", "delivered_frames", "seed", "steps",
                 "created_at", "branch_id", "forked_from_branch_id",
                 "adopted_from_revision",
                 "predecessor_revision",
