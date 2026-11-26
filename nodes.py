@@ -855,12 +855,12 @@ class MiniMaxH3LoopTrim:
             "required": {
                 "images": ("IMAGE", {
                     "tooltip": "Decoded images from the CURRENT H3 sample. "
-                               "The leading pinned overlap is removed."}),
+                               "The repeated head overlap and authored tail grid padding are removed."}),
                 "trim_frames": ("INT", {
                     "default": 0, "min": 0, "max": 4096,
-                    "tooltip": "Connect trim_frames from MiniMax H3 Context "
-                               "Loop Context. In head mode this removes the "
-                               "repeated overlap; before mode supplies 0."}),
+                    "tooltip": "Connect trim_frames from MiniMax H3 Context Loop Context. The active "
+                               "scene state supplies any additional H3 tail grid "
+                               "padding to remove."}),
             },
             "optional": {
                 "audio": ("AUDIO", {
@@ -904,7 +904,7 @@ class MiniMaxH3LoopTrim:
     RETURN_NAMES = ("images", "audio", "images_with_overlap",
                     "overlap_frames")
     OUTPUT_TOOLTIPS = (
-        "Delivered frames with the repeated leading context removed.",
+        "Delivered frames after removing repeated head context and H3 tail grid padding.",
         "Audio trimmed using audio_trim_mode and, when match_tail is enabled, "
         "fitted exactly to the delivered image duration. Synchronized mode "
         "privately carries decoded overlap to Segment Save for AV feathers; "
@@ -918,8 +918,8 @@ class MiniMaxH3LoopTrim:
     )
     FUNCTION = "trim"
     CATEGORY = "conditioning/minimax/context_loop"
-    DESCRIPTION = ("Remove the leading pinned frames from a decoded H3 clip, "
-                   "trimming picture and sound together by default. Optional "
+    DESCRIPTION = ("Remove repeated head context and H3 tail grid padding from a decoded "
+                   "clip, trimming picture and sound together by default. Optional "
                    "fresh-narration mode keeps opening audio by cutting its "
                    "tail instead, unsuitable for lip-sync. In 0.5 "
                    "chains, Current Shot state also resolves the scene blend "
@@ -934,13 +934,16 @@ class MiniMaxH3LoopTrim:
             raise ValueError(
                 "Keep-start narration requires Current Shot state, decoded "
                 "audio, and match_tail enabled. It is not an A/V-sync mode.")
-        n = max(0, int(trim_frames))
+
+        head_trim_frames = max(0, int(trim_frames))
         total = int(images.shape[0])
-        if n >= total:
+        if head_trim_frames >= total:
             raise ValueError(
-                "h3_motion_context: asked to trim %d frames from a %d frame clip"
-                % (n, total))
-        out_images = images[n:] if n else images
+                "h3_motion_context: asked to trim %d leading frames from a %d "
+                "frame clip" % (head_trim_frames, total))
+
+        tail_trim_frames = 0
+        planned_head_overlap = None
         requested_retained = 0
         if state is not None:
             if not isinstance(state, dict):
@@ -958,10 +961,69 @@ class MiniMaxH3LoopTrim:
                 raise ValueError(
                     "h3_motion_context: Loop Trim state has no valid current "
                     "scene.") from exc
+
             if narration:
                 from .chain_nodes import _require_fresh_narration_policy
 
                 _require_fresh_narration_policy(plan, shot)
+
+            raw_frames = shot.get("raw_frames")
+            delivered_frames = shot.get("delivered_frames")
+            grid_padding = shot.get("grid_padding_frames", 0)
+            if isinstance(grid_padding, bool):
+                raise ValueError(
+                    "h3_motion_context: grid_padding_frames must be a "
+                    "non-negative integer.")
+            try:
+                tail_trim_frames = int(grid_padding or 0)
+            except (TypeError, ValueError, OverflowError) as exc:
+                raise ValueError(
+                    "h3_motion_context: grid_padding_frames must be a "
+                    "non-negative integer.") from exc
+            if tail_trim_frames < 0:
+                raise ValueError(
+                    "h3_motion_context: grid_padding_frames cannot be negative.")
+
+            if raw_frames is not None and delivered_frames is not None:
+                try:
+                    raw_frames = int(raw_frames)
+                    delivered_frames = int(delivered_frames)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise ValueError(
+                        "h3_motion_context: current scene has invalid raw or "
+                        "delivered frame counts.") from exc
+                if raw_frames != total:
+                    raise ValueError(
+                        "h3_motion_context: decoded scene contains %d frames; "
+                        "the active Plan expects %d raw H3 frames." %
+                        (total, raw_frames))
+                planned_head_overlap = max(
+                    0, raw_frames - delivered_frames - tail_trim_frames)
+                authored_head_overlap = shot.get("head_overlap_frames")
+                if authored_head_overlap is not None:
+                    try:
+                        authored_head_overlap = int(authored_head_overlap)
+                    except (TypeError, ValueError, OverflowError) as exc:
+                        raise ValueError(
+                            "h3_motion_context: head_overlap_frames must be "
+                            "a non-negative integer.") from exc
+                    if authored_head_overlap < 0 or (
+                            authored_head_overlap != planned_head_overlap):
+                        raise ValueError(
+                            "h3_motion_context: Plan head overlap metadata is "
+                            "inconsistent with raw, delivered and padding "
+                            "frame counts.")
+                if head_trim_frames != planned_head_overlap:
+                    raise ValueError(
+                        "h3_motion_context: Context node produced a %d-frame "
+                        "head trim; the Plan expects %d head-overlap frames." %
+                        (head_trim_frames, planned_head_overlap))
+            else:
+                # Legacy states have no delivery geometry. Preserve their
+                # historical head-only trimming behavior.
+                planned_head_overlap = head_trim_frames
+                tail_trim_frames = 0
+
             configured = shot.get("video_blend_frames")
             if configured is None or (
                     isinstance(configured, str) and not configured.strip()):
@@ -974,7 +1036,7 @@ class MiniMaxH3LoopTrim:
                     "number of frames.")
             try:
                 requested_retained = int(configured)
-            except (TypeError, ValueError) as exc:
+            except (TypeError, ValueError, OverflowError) as exc:
                 raise ValueError(
                     "h3_motion_context: current scene blend must be a whole "
                     "number of frames.") from exc
@@ -982,41 +1044,39 @@ class MiniMaxH3LoopTrim:
                 raise ValueError(
                     "h3_motion_context: current scene blend cannot be "
                     "negative.")
-            # Match Segment Save's effective-blend contract.  A Plan can carry
-            # a non-zero default into scene 1 even though scene 1 has no
-            # repeated prefix; similarly, runtime trimming remains the final
-            # authority if a decoder returns less overlap than configured.
-            # Missing raw/delivered fields are allowed for legacy states and
-            # tests, where trim_frames is the only available overlap count.
-            raw_frames = shot.get("raw_frames")
-            delivered_frames = shot.get("delivered_frames")
-            if raw_frames is None or delivered_frames is None:
-                repeated_frames = n
-            else:
-                try:
-                    repeated_frames = max(
-                        0, int(raw_frames) - int(delivered_frames))
-                except (TypeError, ValueError) as exc:
-                    raise ValueError(
-                        "h3_motion_context: current scene has invalid raw or "
-                        "delivered frame counts.") from exc
-            requested_retained = min(
-                requested_retained, n, repeated_frames)
-        retained = min(n, requested_retained)
-        overlap_images = images[n - retained:] if retained else out_images
+
+        delivered_end = total - tail_trim_frames
+        if delivered_end <= head_trim_frames:
+            raise ValueError(
+                "h3_motion_context: head and tail trims remove all %d raw "
+                "frames (head=%d, tail=%d)." %
+                (total, head_trim_frames, tail_trim_frames))
+        delivered_frames = delivered_end - head_trim_frames
+        out_images = images[head_trim_frames:delivered_end]
+        retained = min(
+            head_trim_frames,
+            requested_retained,
+            planned_head_overlap or 0,
+        )
+        overlap_images = (
+            images[head_trim_frames - retained:delivered_end]
+            if retained else out_images)
 
         out_audio = audio
         if audio is not None:
             waveform = audio["waveform"]
             sr = int(audio["sample_rate"])
-            seconds = n / float(fps)
-            cut = int(round(seconds * sr))
+            if sr <= 0:
+                raise ValueError("h3_motion_context: audio sample rate must be positive.")
+            cut = int(round(head_trim_frames / float(fps) * sr))
             length = int(waveform.shape[-1])
             if cut >= length:
                 raise ValueError(
                     "h3_motion_context: trimming %.3fs from %.3fs of audio would "
                     "leave nothing. Check that fps matches the clip."
-                    % (seconds, length / sr))
+                    % (head_trim_frames / float(fps), length / sr))
+
+            full_waveform = None
             if match_tail:
                 full_want = int(round(total / float(fps) * sr))
                 if length != full_want:
@@ -1025,51 +1085,69 @@ class MiniMaxH3LoopTrim:
                         "h3_motion_context: decoded %d-frame full audio" %
                         total)
                 full_waveform = waveform
-                frames_left = total - n
-                want = int(round(frames_left / float(fps) * sr))
+                want = int(round(delivered_frames / float(fps) * sr))
                 if narration:
                     # Voice-over is explicitly placed at delivered scene time
-                    # zero. Never publish the raw overlap as continuation audio:
-                    # masked-AV assembly would put it back over the prior scene.
+                    # zero. Keep-start narration is not a lip-sync path.
                     waveform = full_waveform[..., :want]
                     full_waveform = None
-                    if n:
+                    if head_trim_frames or tail_trim_frames:
                         _LOG.warning(
-                            "H3 keep-start narration: keeping the opening audio "
-                            "and removing %.3fs from the END. Sound is advanced "
-                            "relative to picture; inspect the closing words.",
-                            seconds)
+                            "H3 keep-start narration: keeping the opening "
+                            "audio and removing %.3fs from the END to match "
+                            "the delivered scene. Inspect closing words.",
+                            (head_trim_frames + tail_trim_frames) / float(fps))
                 else:
-                    waveform = full_waveform[..., cut:]
+                    waveform = full_waveform[..., cut:cut + want]
                 have = int(waveform.shape[-1])
                 if have != want:
                     waveform = conform_waveform_length(
                         waveform, want,
-                        "h3_motion_context: decoded %d-frame audio" %
-                        frames_left)
+                        "h3_motion_context: decoded %d-frame delivered audio" %
+                        delivered_frames)
             else:
-                full_waveform = None
-                waveform = waveform[..., cut:]
+                # Keep the existing decoder-grid behavior when Match Tail is
+                # disabled, but still remove the authored H3 padding at the
+                # tail rather than leaking it into the saved clip.
+                end_sample = (
+                    int(round(delivered_end / float(fps) * sr))
+                    if tail_trim_frames else length)
+                waveform = waveform[..., cut:end_sample]
 
             out_audio = {"waveform": waveform, "sample_rate": sr}
             if narration:
                 out_audio[AUDIO_TRIM_MODE_KEY] = audio_trim_mode
             if full_waveform is not None:
+                # Segment Save needs the raw AV window only through the final
+                # delivered frame. The removed H3 grid padding is not part of
+                # the incoming audio overlap and must not be assembled.
+                overlap_frames = total - tail_trim_frames
+                overlap_samples = int(round(
+                    overlap_frames / float(fps) * sr))
+                overlap_waveform = full_waveform[..., :overlap_samples]
+                if int(overlap_waveform.shape[-1]) != overlap_samples:
+                    overlap_waveform = conform_waveform_length(
+                        overlap_waveform, overlap_samples,
+                        "h3_motion_context: unpadded AV overlap audio")
                 out_audio.update({
-                    AUDIO_WITH_OVERLAP_WAVEFORM_KEY: full_waveform,
-                    AUDIO_WITH_OVERLAP_FRAMES_KEY: total,
-                    AUDIO_TRIM_FRAMES_KEY: n,
+                    AUDIO_WITH_OVERLAP_WAVEFORM_KEY: overlap_waveform,
+                    AUDIO_WITH_OVERLAP_FRAMES_KEY: overlap_frames,
+                    AUDIO_TRIM_FRAMES_KEY: head_trim_frames,
                 })
-            _LOG.info("h3_motion_context: %d frames / %.4fs picture, %.4fs sound, "
-                      "drift %.2fms",
-                      total - n, (total - n) / float(fps),
-                      int(waveform.shape[-1]) / sr,
-                      abs((total - n) / float(fps) - int(waveform.shape[-1]) / sr) * 1000.0)
-        elif n:
-            _LOG.info("h3_motion_context: trimmed %d leading frames, %d remain. "
-                      "No audio wired; if this clip has sound, mux it through "
-                      "this node or it will run %.3fs ahead of the picture.",
-                      n, total - n, n / float(fps))
+            _LOG.info(
+                "h3_motion_context: raw=%d frames; trimmed %d head-overlap + "
+                "%d tail-padding frames; delivered=%d frames / %.4fs; "
+                "audio=%.4fs; drift=%.2fms",
+                total, head_trim_frames, tail_trim_frames, delivered_frames,
+                delivered_frames / float(fps),
+                int(waveform.shape[-1]) / sr,
+                abs(delivered_frames / float(fps)
+                    - int(waveform.shape[-1]) / sr) * 1000.0)
+        elif head_trim_frames or tail_trim_frames:
+            _LOG.info(
+                "h3_motion_context: trimmed %d head-overlap + %d tail-padding "
+                "frames; %d delivered frames. No audio wired.",
+                head_trim_frames, tail_trim_frames, delivered_frames)
 
         return (out_images, out_audio, overlap_images, retained)
 
