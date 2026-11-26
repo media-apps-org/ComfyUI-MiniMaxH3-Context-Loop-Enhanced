@@ -18709,9 +18709,12 @@ class MiniMaxH3ChainCurrent:
             scene_audio_policy["generated_continuity"],
             "on" if scene_audio_policy.get(
                 "source_audio_target") == "locked" else "off")
-        status = ("clip %d/%d %s; raw=%df delivered=%df; blend=%df; %s; %s; "
-                  "audio=%s; seed=%d" %
+        status = ("clip %d/%d %s; raw=%df requested=%df head=%df pad=%df "
+                  "delivered=%df; blend=%df; %s; %s; audio=%s; seed=%d" %
                   (index, len(plan["shots"]), shot["id"], shot["raw_frames"],
+                   shot.get("requested_frames", shot["delivered_frames"]),
+                   _head_overlap_frame_count(shot),
+                   int(shot.get("grid_padding_frames", 0) or 0),
                    shot["delivered_frames"], video_blend_frames, audio_status,
                    alignment_status, scene_audio_status, shot["seed"]))
         dependency_state = dict(state)
