@@ -8,7 +8,7 @@ import {
     parsePlanJson,
     planToJson,
     promptValueToText,
-} from "./h3_chain_plan_core.mjs?v=0.7.12";
+} from "./h3_chain_plan_core.mjs?v=0.7.13";
 import * as promptCompanionSync from "./h3_prompt_companion_sync.mjs?v=0.7.26";
 import {
     refreshRestoredPlanEditors,
