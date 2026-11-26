@@ -34,6 +34,13 @@ def main():
                  "duration_seconds": 8.8},
             ],
         },
+        {
+            "shots": [
+                {"id": "raw-first", "prompt": "Exact raw first", "length": 243},
+                {"id": "raw-continuation", "prompt": "Exact raw continuation",
+                 "length": 124},
+            ],
+        },
     ]
     script = """
       import {h3FrameLength, parsePlanJson, calculatePlanTiming, setShotLengthMode} from './web/h3_chain_plan_core.mjs';
@@ -75,7 +82,8 @@ def main():
     # frame grid is padded, then Loop Trim removes context at the head and
     # H3 grid padding at the tail. Verify both a first scene and a 22-frame
     # head-context continuation (10.0s and 8.8s respectively).
-    head_compensated, before_compensated = browser["plans"][-2:]
+    head_compensated, before_compensated, exact_head, exact_before = (
+        browser["plans"][-4:])
     assert head_compensated == {
         "raw": [243, 243],
         "requested": [240, 212],
@@ -91,6 +99,24 @@ def main():
         "head": [0, 0],
         "delivered": [240, 212],
         "total": 452,
+    }
+    # Explicit length/frames remain exact raw H3 authoring and do not receive
+    # hidden duration compensation. Only the normal head context is removed.
+    assert exact_head == {
+        "raw": [243, 124],
+        "requested": [243, 124],
+        "padding": [0, 0],
+        "head": [0, 22],
+        "delivered": [243, 102],
+        "total": 345,
+    }
+    assert exact_before == {
+        "raw": [243, 124],
+        "requested": [243, 124],
+        "padding": [0, 0],
+        "head": [0, 0],
+        "delivered": [243, 124],
+        "total": 367,
     }
     with tempfile.TemporaryDirectory() as directory:
         fixture["folder_paths"].output_directory = directory
@@ -114,7 +140,8 @@ def main():
         if path.suffix in (".js", ".mjs"):
             for version in re.findall(r'h3_chain_plan_core\.mjs\?v=([^"\']+)', path.read_text()):
                 assert version == "0.7.13", (path.name, version)
-    print(f"Python/browser parity: {len(durations)} durations, 6 compiled plans, exact frames and cache keys passed")
+    print(f"Python/browser parity: {len(durations)} durations, "
+          f"{len(browser['plans'])} compiled plans, exact frames and cache keys passed")
 
 
 if __name__ == "__main__":
