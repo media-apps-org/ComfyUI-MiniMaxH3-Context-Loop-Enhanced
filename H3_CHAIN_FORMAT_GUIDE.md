@@ -311,26 +311,43 @@ length % 17 == 5
 }
 ```
 
-The node converts seconds using:
+For `duration_seconds`, the Plan treats the authored duration as the
+**final delivered scene duration**. The compiler keeps H3's native raw-length
+constraint while planning both a repeated incoming head and removable tail
+padding:
 
 ```text
 requested_frames = ceil(duration_seconds × 24)
-raw_frames = the next frame count where raw_frames % 17 == 5
+head_overlap_frames = effective incoming context (0 for scene 1 without imported context)
+raw_frames = next H3-valid 17k+5 length >= requested_frames + head_overlap_frames
+grid_padding_frames = raw_frames - requested_frames - head_overlap_frames
+delivered_frames = raw_frames - head_overlap_frames - grid_padding_frames
 ```
 
-It always rounds up. The generated duration can therefore be longer than the
-number entered.
+After generation, `MiniMax H3 Context Loop Trim` removes the repeated context
+from the **head** and the H3 grid padding from the **tail**. The final video
+therefore contains the requested frame count (the minimum five-frame H3 scene
+is the exception for very short durations). The compiler, Loop Trim, Segment
+Save, checkpoints, audio assembly, review recovery and PNG/WAV export all carry
+the same separate head/padding/delivered frame values.
 
-| Requested | Raw frames | Raw duration | Delivered by clip 1 | Delivered by later clip with 22-frame head context |
-|---:|---:|---:|---:|---:|
-| 0.2 s | 5 | 0.208 s | 5 frames / 0.208 s | Invalid: not longer than the overlap |
-| 1 s | 39 | 1.625 s | 39 frames / 1.625 s | 17 frames / 0.708 s |
-| 5 s | 124 | 5.167 s | 124 frames / 5.167 s | 102 frames / 4.250 s |
-| 10 s | 243 | 10.125 s | 243 frames / 10.125 s | 221 frames / 9.208 s |
-| 15 s | 362 | 15.083 s | 362 frames / 15.083 s | 340 frames / 14.167 s |
-| 30 s | 736 | 30.667 s | 736 frames / 30.667 s | 714 frames / 29.750 s |
+Examples at 24 FPS. The continuation column assumes a 22-frame incoming head:
 
-### Use frames for exact control
+| Requested | Scene 1 raw / pad / delivered | Continuation raw / head / pad / delivered |
+|---:|---:|---:|
+| 1 s | 39 / 15 / 24 frames (1.000 s) | 56 / 22 / 10 / 24 frames (1.000 s) |
+| 5 s | 124 / 4 / 120 frames (5.000 s) | 158 / 22 / 16 / 120 frames (5.000 s) |
+| 8.8 s | 226 / 14 / 212 frames (8.833 s) | 243 / 22 / 9 / 212 frames (8.833 s) |
+| 10 s | 243 / 3 / 240 frames (10.000 s) | 277 / 22 / 15 / 240 frames (10.000 s) |
+| 15 s | 362 / 2 / 360 frames (15.000 s) | 396 / 22 / 14 / 360 frames (15.000 s) |
+| 30 s | 736 / 16 / 720 frames (30.000 s) | 753 / 22 / 11 / 720 frames (30.000 s) |
+
+For example, an 8.8-second authored scene requests 212 frames because the
+delivery timeline is discrete at 24 FPS. Its delivered duration is therefore
+212 / 24 = 8.833 seconds. The extra 0.033 seconds is frame-rate quantization,
+not H3 grid padding.
+
+### Use frames for exact raw H3 control
 
 ```json
 {
@@ -340,28 +357,34 @@ number entered.
 }
 ```
 
-Use `length` when exact H3 timing matters. Invalid examples include `120`,
-`240`, and `360`; the nearby valid values are `124`, `243`, and `362`.
+Use `length` or `frames` when you need to specify the **raw H3 generation
+length** exactly. It must be an H3-valid value such as 5, 22, 39, 56, 73, 90,
+107, 124, 141, and so on. Exact frame authoring does not infer a target
+delivery duration or add grid-padding compensation: in `anchor_mode: head`,
+the delivered length is the exact raw length minus the actual incoming head
+overlap.
 
 ### Raw length versus delivered length
 
-With the recommended `anchor_mode: head`, the beginning of every continuation
-contains the previous scene's repeated context. `MiniMax H3 Context Loop Trim`
-removes that overlap:
+With the recommended `anchor_mode: head`, every continuation contains the
+previous scene's repeated context at its beginning. The standard Loop Trim
+route removes that head plus the separately planned grid padding at the tail:
 
 ```text
-clip 1 delivered frames = raw_frames
-later delivered frames  = raw_frames - that scene's effective context_length
+head_overlap_frames = raw_frames - delivered_frames - grid_padding_frames
+delivered_frames = raw_frames - head_overlap_frames - grid_padding_frames
 ```
 
 The Trim node's optional `images_with_overlap` output can retain the requested
-number of repeated visual frames for an external stitcher. Its standard
-`images` output remains fully trimmed, and audio always removes the complete
-overlap from its public waveform. With `match_tail` enabled, that same AUDIO
-value privately carries the full decoded overlap directly to Segment Save.
-Generated-audio assembly lets a later masked-AV scene own that interval, so a
-Soft AV audio release is not discarded. No additional audio socket or wire is
-needed. Visual assembly remains independent and uses its configured overlap.
+number of repeated visual frames for an external stitcher. It includes the
+retained head and delivered frames, but never the grid-padding tail. Its
+standard `images` output contains only delivered frames. When `match_tail`
+is enabled, audio is trimmed to the same delivered frame count; its private AV
+overlap waveform contains the unpadded raw interval, so generated-audio
+assembly can still give a later masked-AV scene ownership of the incoming
+overlap. A Soft AV audio release is therefore preserved without reintroducing
+the tail padding. Visual assembly remains independent and uses its configured
+overlap.
 
 Generated-audio assembly derives each scene's sample budget from cumulative
 delivered frame boundaries. This distributes fractional samples across the run
