@@ -27,6 +27,13 @@ def main():
                    for i, seconds in enumerate([1, 6, 12], 1)]},
         {"defaults": {"duration_seconds": 6}, "shots": ["First", "Second"]},
         {"duration_seconds": 12, "shots": ["First", "Second"]},
+        {
+            "shots": [
+                {"id": "ten", "prompt": "Ten seconds", "duration_seconds": 10},
+                {"id": "eight-eight", "prompt": "Eight point eight seconds",
+                 "duration_seconds": 8.8},
+            ],
+        },
     ]
     script = """
       import {h3FrameLength, parsePlanJson, calculatePlanTiming, setShotLengthMode} from './web/h3_chain_plan_core.mjs';
@@ -35,7 +42,14 @@ def main():
       const lengths = input.durations.map(value => { try { return h3FrameLength(value); } catch { return null; } });
       const plans = input.plans.flatMap(plan => ['head', 'before'].map(anchorMode => {
         const result = calculatePlanTiming(parsePlanJson(JSON.stringify(plan)), {anchorMode});
-        return {raw: result.shots.map(s => s.rawFrames), delivered: result.shots.map(s => s.deliveredFrames), total: result.totalFrames};
+        return {
+          raw: result.shots.map(s => s.rawFrames),
+          requested: result.shots.map(s => s.requestedFrames),
+          padding: result.shots.map(s => s.gridPaddingFrames),
+          head: result.shots.map(s => s.headOverlapFrames),
+          delivered: result.shots.map(s => s.deliveredFrames),
+          total: result.totalFrames
+        };
       }));
       const converted = [1, 6, 12].map(duration_seconds => {
         const shot = {duration_seconds}; setShotLengthMode(shot, 'frames'); return shot.length;
@@ -57,15 +71,43 @@ def main():
         assert actual == expected, (seconds, actual, expected)
     assert browser["converted"] == [chain._h3_frame_length(s) for s in [1, 6, 12]]
     assert browser["exact"] == [22, 141, 277], "Never rewrite authored exact frames"
+    # duration_seconds is a requested delivered duration. The raw H3
+    # frame grid is padded, then Loop Trim removes context at the head and
+    # H3 grid padding at the tail. Verify both a first scene and a 22-frame
+    # head-context continuation (10.0s and 8.8s respectively).
+    head_compensated, before_compensated = browser["plans"][-2:]
+    assert head_compensated == {
+        "raw": [243, 243],
+        "requested": [240, 212],
+        "padding": [3, 9],
+        "head": [0, 22],
+        "delivered": [240, 212],
+        "total": 452,
+    }
+    assert before_compensated == {
+        "raw": [243, 226],
+        "requested": [240, 212],
+        "padding": [3, 14],
+        "head": [0, 0],
+        "delivered": [240, 212],
+        "total": 452,
+    }
     with tempfile.TemporaryDirectory() as directory:
         fixture["folder_paths"].output_directory = directory
         for offset, (raw, anchor) in enumerate((plan, mode) for plan in plans for mode in ["head", "before"]):
             compiled = chain._normalize_plan(json.dumps(raw), "duration_parity", 64, 64,
                                               22, "video", anchor, "disabled", "generated_audio",
                                               22, 15, 20, 0, 18)
-            expected = {"raw": [s["raw_frames"] for s in compiled["shots"]],
-                        "delivered": [s["delivered_frames"] for s in compiled["shots"]],
-                        "total": sum(s["delivered_frames"] for s in compiled["shots"])}
+            expected = {
+                "raw": [s["raw_frames"] for s in compiled["shots"]],
+                "requested": [s["requested_frames"] for s in compiled["shots"]],
+                "padding": [s.get("grid_padding_frames", 0)
+                            for s in compiled["shots"]],
+                "head": [s.get("head_overlap_frames", 0)
+                         for s in compiled["shots"]],
+                "delivered": [s["delivered_frames"] for s in compiled["shots"]],
+                "total": sum(s["delivered_frames"] for s in compiled["shots"]),
+            }
             assert browser["plans"][offset] == expected, (raw, anchor, browser["plans"][offset], expected)
         assert not list(pathlib.Path(directory).iterdir()), "Timing inspection wrote project files"
     for path in (ROOT / "web").iterdir():
