@@ -727,21 +727,29 @@ export function moveShot(shots, from, to) {
     shots.splice(to, 0, shot);
 }
 
+export function h3FrameGridLength(requestedFrames) {
+    const requested = Math.max(5, Math.ceil(Number(requestedFrames) - 1e-9));
+    if (!Number.isFinite(requested) || requested <= 0) {
+        throw new Error("Requested frame count must be a finite positive number.");
+    }
+    // H3 target lengths follow 17k+5. The returned raw length may include
+    // both a repeated head context and tail padding; delivery removes them.
+    const length = requested + ((5 - (requested % 17) + 17) % 17);
+    if (length > MAX_H3_FRAMES) {
+        throw new Error(
+            `Requested duration requires ${length} H3 frames; the largest valid length is ${MAX_H3_FRAMES}.`,
+        );
+    }
+    return length;
+}
+
 export function h3FrameLength(seconds) {
     const numeric = Number(seconds);
     if (!Number.isFinite(numeric) || numeric <= 0) {
         throw new Error("Duration must be a finite positive number.");
     }
     const requested = Math.max(5, Math.ceil(numeric * FPS - 1e-9));
-    // JS remainder can be negative; Python modulo in _h3_frame_length cannot.
-    // Always advance to the next valid length, including near the upper bound.
-    const length = requested + ((5 - (requested % 17) + 17) % 17);
-    if (length > MAX_H3_FRAMES) {
-        throw new Error(
-            `Duration rounds to ${length} frames; H3's largest valid length is ${MAX_H3_FRAMES}.`,
-        );
-    }
-    return length;
+    return h3FrameGridLength(requested);
 }
 
 export function shotLengthMode(shot) {
@@ -1423,15 +1431,40 @@ export function validateH3Length(value) {
     return length;
 }
 
-function sceneRawFrames(shot, defaultDuration) {
-    if (shot.length !== undefined && shot.length !== null && shot.length !== "") {
-        return validateH3Length(shot.length);
+function sceneFrameGeometry(shot, defaultDuration, headContextFrames = 0) {
+    const headContext = Math.max(0, Math.trunc(Number(headContextFrames) || 0));
+    const explicitLength = shot.length !== undefined && shot.length !== null && shot.length !== ""
+        ? shot.length
+        : shot.frames !== undefined && shot.frames !== null && shot.frames !== ""
+            ? shot.frames
+            : null;
+    if (explicitLength !== null) {
+        const rawFrames = validateH3Length(explicitLength);
+        if (headContext > 0 && rawFrames <= headContext) {
+            throw new Error(
+                `${rawFrames} raw frames are not longer than the ${headContext}-frame overlap.`,
+            );
+        }
+        return {
+            rawFrames,
+            requestedFrames: rawFrames - headContext,
+            gridPaddingFrames: 0,
+            headContextFrames: headContext,
+        };
     }
-    if (shot.frames !== undefined && shot.frames !== null && shot.frames !== "") {
-        return validateH3Length(shot.frames);
+    const duration = Number(shot.duration_seconds ?? defaultDuration);
+    if (!Number.isFinite(duration) || duration <= 0) {
+        throw new Error("Duration must be a finite positive number.");
     }
-    const duration = shot.duration_seconds ?? defaultDuration;
-    return h3FrameLength(duration);
+    const requestedFrames = Math.max(5, Math.ceil(duration * FPS - 1e-9));
+    const rawFrames = h3FrameGridLength(requestedFrames + headContext);
+    const gridPaddingFrames = rawFrames - headContext - requestedFrames;
+    return {
+        rawFrames,
+        requestedFrames,
+        gridPaddingFrames,
+        headContextFrames: headContext,
+    };
 }
 
 function validateSeed(seed) {
@@ -1775,22 +1808,27 @@ export function calculatePlanTiming(plan, settings = {}) {
         }
 
         let rawFrames = 0;
+        let requestedFrames = 0;
+        let gridPaddingFrames = 0;
+        let headOverlapFrames = 0;
+        let generationStartFrame = stitchedFrames;
         try {
-            rawFrames = sceneRawFrames(shot, planDefaultDuration);
+            headOverlapFrames = index > 1 && anchorMode === "head"
+                ? sceneContext : 0;
+            const geometry = sceneFrameGeometry(
+                shot, planDefaultDuration, headOverlapFrames);
+            rawFrames = geometry.rawFrames;
+            requestedFrames = geometry.requestedFrames;
+            gridPaddingFrames = geometry.gridPaddingFrames;
+            headOverlapFrames = geometry.headContextFrames;
         } catch (error) {
             rowErrors.push(error.message);
         }
 
-        let deliveredFrames = rawFrames;
-        let generationStartFrame = stitchedFrames;
-        if (index > 1 && anchorMode === "head") {
-            if (sceneContext > 0 && rawFrames <= sceneContext) {
-                rowErrors.push(
-                    `${rawFrames} raw frames are not longer than the ${sceneContext}-frame overlap.`,
-                );
-            }
-            deliveredFrames = Math.max(0, rawFrames - sceneContext);
-            generationStartFrame = stitchedFrames - sceneContext;
+        const deliveredFrames = Math.max(
+            0, rawFrames - headOverlapFrames - gridPaddingFrames);
+        if (headOverlapFrames > 0) {
+            generationStartFrame = stitchedFrames - headOverlapFrames;
         }
 
         rows.push({
@@ -1799,6 +1837,9 @@ export function calculatePlanTiming(plan, settings = {}) {
             id,
             rawFrames,
             rawSeconds: rawFrames / FPS,
+            requestedFrames,
+            gridPaddingFrames,
+            headOverlapFrames,
             deliveredFrames,
             deliveredSeconds: deliveredFrames / FPS,
             generationStartFrame,
