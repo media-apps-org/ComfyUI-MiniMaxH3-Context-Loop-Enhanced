@@ -1043,10 +1043,19 @@ def _h3_frame_length(seconds: float) -> int:
 
 
 def _head_overlap_frame_count(shot: dict[str, Any]) -> int:
-    """Return only the repeated incoming head; exclude tail grid padding."""
-    raw_frames = int(shot.get("raw_frames", 0))
-    delivered_frames = int(shot.get("delivered_frames", 0))
-    padding_frames = int(shot.get("grid_padding_frames", 0) or 0)
+    """Return only the repeated incoming head; exclude tail grid padding.
+
+    Editorial output-only views add their in-frame cut to the original head
+    offset and replace the raw/delivered window with the selected prefix.
+    """
+    if "_editorial_raw_out_frames" in shot:
+        raw_frames = _editorial_segment_raw_frames(shot)
+        delivered_frames = _editorial_segment_delivered_frames(shot)
+        padding_frames = 0
+    else:
+        raw_frames = int(shot.get("raw_frames", 0))
+        delivered_frames = int(shot.get("delivered_frames", 0))
+        padding_frames = int(shot.get("grid_padding_frames", 0) or 0)
     return max(0, raw_frames - delivered_frames - padding_frames)
 
 
@@ -9536,16 +9545,17 @@ def _editorial_trimmed_segment(
     # safely round-trip a reset without changing continuation state.
     if in_frames < 0 or in_frames >= out_frames:
         raise ValueError("Editorial trim requires 0 <= in_frame < out_frame.")
+    head_overlap_frames = _head_overlap_frame_count(segment)
     if in_frames and (
             _h3_prefix_frame_boundary_step(
-                raw_frames - delivered_frames + in_frames) is None
+                head_overlap_frames + in_frames) is None
             or (in_frames * int(AUDIO_HZ)) % FPS):
         raise ValueError(
             "Editorial trim scene %s in_frame must be on the shared H3 "
             "video/audio-latent grid." % scene_id)
     if in_frames == 0 and out_frames == delivered_frames:
         return segment
-    raw_out_frames = raw_frames - delivered_frames + out_frames
+    raw_out_frames = head_overlap_frames + out_frames
     video_steps = _h3_prefix_frame_boundary_step(raw_out_frames)
     if video_steps is None and out_frames != delivered_frames:
         raise ValueError(
@@ -11095,7 +11105,8 @@ def _audio_context_state(state: dict[str, Any]) -> dict[str, Any]:
                 "delivered_frames", 0))
         start_frame = _shot_audio_context_start_frame(
             shot, label, raw_frames, delivered_frames, wanted)
-        raw_start = raw_frames - delivered_frames + start_frame
+        source_head_overlap = _head_overlap_frame_count(segment)
+        raw_start = source_head_overlap + start_frame
         start_step = int(round(raw_start / float(FPS) * AUDIO_HZ))
         end_step = int(round(
             (raw_start + int(wanted)) / float(FPS) * AUDIO_HZ))
@@ -11316,10 +11327,12 @@ def _visual_context_state(
             segment, planned_raw_frames)
         delivered_frames = _editorial_segment_delivered_frames(
             segment, planned_delivered_frames)
+        source_head_overlap = _head_overlap_frame_count(segment)
         start_frame = int(start_frame)
         wanted = int(wanted)
         if start_frame not in _native_context_window_starts(
-                raw_frames, delivered_frames, wanted, prefix_frames):
+                raw_frames, delivered_frames, wanted, prefix_frames,
+                source_head_overlap):
             raise ValueError(
                 "H3 %s start %d is not a native latent-aligned window." %
                 (label, start_frame))
@@ -11327,7 +11340,7 @@ def _visual_context_state(
             if int(video.shape[2]) < 1:
                 raise ValueError("H3 %s has no video latent steps." % label)
             return video[:1, :, -1:].detach().contiguous().clone()
-        raw_start = raw_frames - delivered_frames + start_frame
+        raw_start = source_head_overlap + start_frame
         start_step = _h3_native_frame_boundary_step(raw_start)
         end_step = _h3_native_frame_boundary_step(raw_start + wanted)
         target_start = _h3_native_frame_boundary_step(prefix_frames)
@@ -25168,11 +25181,15 @@ def _png_export_audio_record(
     }, "H3 PNG/WAV export clip %d decoded audio" % index)
     raw_frames = int(segment.get("raw_frames", 0))
     delivered_frames = int(segment.get("delivered_frames", 0))
-    repeated_frames = raw_frames - delivered_frames
-    if raw_frames < 1 or delivered_frames < 1 or repeated_frames < 0:
+    grid_padding_frames = int(segment.get("grid_padding_frames", 0) or 0)
+    effective_raw_frames = raw_frames - grid_padding_frames
+    repeated_frames = _head_overlap_frame_count(segment)
+    if (raw_frames < 1 or delivered_frames < 1 or grid_padding_frames < 0
+            or effective_raw_frames < delivered_frames
+            or repeated_frames + delivered_frames != effective_raw_frames):
         raise ValueError(
-            "H3 PNG/WAV export clip %d has invalid raw/delivered frame "
-            "counts %d/%d." % (index, raw_frames, delivered_frames))
+            "H3 PNG/WAV export clip %d has invalid raw/padding/head/delivered "
+            "frame geometry." % index)
     raw_samples = sample_boundary_from_frames(raw_frames, sample_rate, FPS)
     if int(waveform.shape[-1]) != raw_samples:
         waveform = conform_waveform_length(
@@ -25184,6 +25201,9 @@ def _png_export_audio_record(
     delivered_samples = sample_boundary_from_frames(
         delivered_frames, sample_rate, FPS)
     delivered = waveform[..., cut:cut + delivered_samples]
+    overlap_samples = sample_boundary_from_frames(
+        effective_raw_frames, sample_rate, FPS)
+    unpadded_waveform = waveform[..., :overlap_samples]
     if int(delivered.shape[-1]) != delivered_samples:
         delivered = conform_waveform_length(
             delivered, delivered_samples,
@@ -25192,13 +25212,13 @@ def _png_export_audio_record(
         "segment": segment,
         "delivered": delivered.detach().to(device="cpu").contiguous(),
         "overlap": (
-            waveform.detach().to(device="cpu").contiguous()
+            unpadded_waveform.detach().to(device="cpu").contiguous()
             if (migrate_continuation_mode(segment.get(
                     "continuation_mode", default_mode)) in
                 MASKED_CONTINUATION_MODES and repeated_frames > 0 and not narration)
             else None),
         "delivered_frames": delivered_frames,
-        "raw_frames": raw_frames,
+        "raw_frames": effective_raw_frames,
         "repeated_frames": repeated_frames,
         "mode": migrate_continuation_mode(segment.get(
             "continuation_mode", default_mode)),
