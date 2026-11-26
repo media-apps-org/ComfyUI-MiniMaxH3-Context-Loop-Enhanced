@@ -11103,9 +11103,10 @@ def _audio_context_state(state: dict[str, Any]) -> dict[str, Any]:
         delivered_frames = _editorial_segment_delivered_frames(
             segment, plan["shots"][int(segment["index"]) - 1].get(
                 "delivered_frames", 0))
-        start_frame = _shot_audio_context_start_frame(
-            shot, label, raw_frames, delivered_frames, wanted)
         source_head_overlap = _head_overlap_frame_count(segment)
+        start_frame = _shot_audio_context_start_frame(
+            shot, label, raw_frames, delivered_frames, wanted,
+            source_head_overlap)
         raw_start = source_head_overlap + start_frame
         start_step = int(round(raw_start / float(FPS) * AUDIO_HZ))
         end_step = int(round(
@@ -24767,10 +24768,15 @@ def _checkpoint_export_segments(manifest: dict[str, Any]) -> list[dict[str, Any]
                 "H3 PNG export checkpoint is missing: %s" % checkpoint)
         raw_frames = int(segment.get("raw_frames", 0))
         delivered_frames = int(segment.get("delivered_frames", 0))
-        if raw_frames < 1 or delivered_frames < 1 or delivered_frames > raw_frames:
+        grid_padding_frames = int(segment.get("grid_padding_frames", 0) or 0)
+        effective_raw_frames = raw_frames - grid_padding_frames
+        head_overlap_frames = _head_overlap_frame_count(segment)
+        if (raw_frames < 1 or delivered_frames < 1 or grid_padding_frames < 0
+                or effective_raw_frames < delivered_frames
+                or head_overlap_frames + delivered_frames != effective_raw_frames):
             raise ValueError(
-                "H3 PNG export clip %d has invalid raw/delivered frame counts "
-                "%d/%d." % (expected_index, raw_frames, delivered_frames))
+                "H3 PNG export clip %d has invalid raw/padding/head/delivered "
+                "frame geometry." % expected_index)
         delivered_total += delivered_frames
     expected_total = int(manifest.get("total_delivered_frames", -1))
     if delivered_total != expected_total:
@@ -25519,9 +25525,13 @@ class MiniMaxH3ChainExportPNG:
                 raw_frames = int(segment["raw_frames"])
                 delivered_frames = _editorial_segment_delivered_frames(
                     editorial_segment)
-                trim_frames = raw_frames - delivered_frames
-                technical_trim_frames = (
-                    raw_frames - int(segment["delivered_frames"]))
+                source_in = int(segment.get("_editorial_in_frames", 0))
+                trim_frames = _head_overlap_frame_count(segment)
+                technical_trim_frames = trim_frames - source_in
+                if technical_trim_frames < 0:
+                    raise ValueError(
+                        "H3 PNG export clip %d has an invalid editorial head offset."
+                        % index)
                 checkpoint_mib = os.path.getsize(checkpoint) / (1024 * 1024)
 
                 save_partial("verifying checkpoint", index)
@@ -25592,10 +25602,8 @@ class MiniMaxH3ChainExportPNG:
                         "manifest requires %d raw frames before trimming %d "
                         "overlap frames." %
                         (int(images.shape[0]), index, raw_frames, trim_frames))
-                source_in = int(segment.get("_editorial_in_frames", 0))
                 images = images[
-                    technical_trim_frames + source_in:
-                    technical_trim_frames + source_in + delivered_frames]
+                    trim_frames:trim_frames + delivered_frames]
                 progress_done += delivered_frames
                 _png_export_update_progress(
                     progress_bar, progress_done, progress_total)
