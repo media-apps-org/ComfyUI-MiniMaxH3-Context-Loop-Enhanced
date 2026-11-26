@@ -25188,30 +25188,39 @@ def _png_export_audio_record(
         "waveform": decoded,
         "sample_rate": sample_rate,
     }, "H3 PNG/WAV export clip %d decoded audio" % index)
-    raw_frames = int(segment.get("raw_frames", 0))
-    delivered_frames = int(segment.get("delivered_frames", 0))
+    source_raw_frames = int(segment.get("raw_frames", 0))
+    delivered_frames = _editorial_segment_delivered_frames(segment)
     grid_padding_frames = int(segment.get("grid_padding_frames", 0) or 0)
-    effective_raw_frames = raw_frames - grid_padding_frames
+    editorial_raw_end = (
+        _editorial_segment_raw_frames(segment)
+        if "_editorial_raw_out_frames" in segment
+        else source_raw_frames - grid_padding_frames)
     repeated_frames = _head_overlap_frame_count(segment)
-    if (raw_frames < 1 or delivered_frames < 1 or grid_padding_frames < 0
-            or effective_raw_frames < delivered_frames
-            or repeated_frames + delivered_frames != effective_raw_frames):
+    if (source_raw_frames < 1 or delivered_frames < 1
+            or grid_padding_frames < 0
+            or editorial_raw_end < delivered_frames
+            or editorial_raw_end > source_raw_frames - grid_padding_frames
+            or repeated_frames + delivered_frames != editorial_raw_end):
         raise ValueError(
             "H3 PNG/WAV export clip %d has invalid raw/padding/head/delivered "
             "frame geometry." % index)
-    raw_samples = sample_boundary_from_frames(raw_frames, sample_rate, FPS)
+    # Decode/validate the full sampled latent duration, then crop the exported
+    # AV window to the output-only editorial end (or the unpadded scene end).
+    raw_samples = sample_boundary_from_frames(
+        source_raw_frames, sample_rate, FPS)
     if int(waveform.shape[-1]) != raw_samples:
         waveform = conform_waveform_length(
             waveform, raw_samples,
             "H3 PNG/WAV export clip %d raw audio" % index)
     narration = segment.get("audio_trim_mode") == "fresh_narration_keep_start"
-    cut = (0 if narration else
-           sample_boundary_from_frames(repeated_frames, sample_rate, FPS))
+    editorial_in_frames = int(segment.get("_editorial_in_frames", 0))
+    cut_frames = editorial_in_frames if narration else repeated_frames
+    cut = sample_boundary_from_frames(cut_frames, sample_rate, FPS)
     delivered_samples = sample_boundary_from_frames(
         delivered_frames, sample_rate, FPS)
     delivered = waveform[..., cut:cut + delivered_samples]
     overlap_samples = sample_boundary_from_frames(
-        effective_raw_frames, sample_rate, FPS)
+        editorial_raw_end, sample_rate, FPS)
     unpadded_waveform = waveform[..., :overlap_samples]
     if int(delivered.shape[-1]) != delivered_samples:
         delivered = conform_waveform_length(
@@ -25227,7 +25236,7 @@ def _png_export_audio_record(
                 MASKED_CONTINUATION_MODES and repeated_frames > 0 and not narration)
             else None),
         "delivered_frames": delivered_frames,
-        "raw_frames": effective_raw_frames,
+        "raw_frames": editorial_raw_end,
         "repeated_frames": repeated_frames,
         "mode": migrate_continuation_mode(segment.get(
             "continuation_mode", default_mode)),
