@@ -6453,6 +6453,9 @@ def _scene_dependency_record(
             "seed": int(shot["seed"]),
             "steps": int(shot["steps"]),
             "raw_frames": int(shot["raw_frames"]),
+            "requested_frames": int(shot.get("requested_frames", shot["delivered_frames"])),
+            "grid_padding_frames": int(shot.get("grid_padding_frames", 0) or 0),
+            "head_overlap_frames": _head_overlap_frame_count(shot),
             "delivered_frames": int(shot["delivered_frames"]),
             "generation_start_frame": int(shot["generation_start_frame"]),
             "active_reference_tags": sorted(
@@ -19797,6 +19800,13 @@ class MiniMaxH3ChainSegmentSave:
                 **({"lora_route": str(shot["lora_route"])}
                    if "lora_route" in shot else {}),
                 "sample_rate": str(sample_rate),
+                "raw_frames": str(int(shot["raw_frames"])),
+                "requested_frames": str(int(shot.get(
+                    "requested_frames", shot["delivered_frames"]))),
+                "grid_padding_frames": str(int(
+                    shot.get("grid_padding_frames", 0) or 0)),
+                "head_overlap_frames": str(_head_overlap_frame_count(shot)),
+                "delivered_frames": str(int(shot["delivered_frames"])),
                 "denoised_latent": (
                     "true" if denoised_latent is not None else "false"),
                 "audio_with_overlap": str(
@@ -19818,6 +19828,9 @@ class MiniMaxH3ChainSegmentSave:
                 "revision_metadata": _relative_output_path(published_metadata),
                 "prompt_file": _relative_output_path(published_prompt),
                 "raw_frames": shot["raw_frames"],
+                "requested_frames": shot.get("requested_frames", shot["delivered_frames"]),
+                "grid_padding_frames": int(shot.get("grid_padding_frames", 0) or 0),
+                "head_overlap_frames": _head_overlap_frame_count(shot),
                 "delivered_frames": shot["delivered_frames"],
                 "history_hash": _history_hash(plan, index),
                 "scene_dependency": scene_dependency,
@@ -22923,21 +22936,24 @@ def _generated_audio(manifest: dict[str, Any],
         mode = migrate_continuation_mode(segment.get(
             "continuation_mode", default_mode))
         raw_frames = int(segment.get("raw_frames", delivered_frames))
-        repeated_frames = raw_frames - delivered_frames
-        if repeated_frames < 0:
+        grid_padding_frames = int(segment.get("grid_padding_frames", 0) or 0)
+        overlap_raw_frames = raw_frames - grid_padding_frames
+        repeated_frames = _head_overlap_frame_count(segment)
+        if (grid_padding_frames < 0 or overlap_raw_frames < delivered_frames
+                or repeated_frames + delivered_frames != overlap_raw_frames):
             raise ValueError(
-                "Clip %d has %d raw frames but %d delivered frames." %
-                (int(segment["index"]), raw_frames, delivered_frames))
+                "Clip %d has inconsistent raw/requested/padding/head/delivered "
+                "frame geometry." % int(segment["index"]))
         overlap = tensors.get("audio_with_overlap")
         if overlap is not None:
             overlap_expected = sample_boundary_from_frames(
-                raw_frames, current_rate, FPS)
+                overlap_raw_frames, current_rate, FPS)
             if int(overlap.shape[-1]) != overlap_expected:
                 raise ValueError(
                     "Checkpoint for clip %d has %d overlap-audio samples; "
-                    "expected %d for %d raw frames." %
+                    "expected %d for %d unpadded raw frames." %
                     (segment["index"], int(overlap.shape[-1]),
-                     overlap_expected, raw_frames))
+                     overlap_expected, overlap_raw_frames))
             if tuple(overlap.shape[:-1]) != tuple(waveform.shape[:-1]):
                 raise ValueError(
                     "Checkpoint for clip %d has mismatched delivered/overlap "
@@ -22949,7 +22965,7 @@ def _generated_audio(manifest: dict[str, Any],
             "delivered": waveform,
             "overlap": overlap,
             "delivered_frames": delivered_frames,
-            "raw_frames": raw_frames,
+            "raw_frames": overlap_raw_frames,
             "repeated_frames": repeated_frames,
             "mode": mode,
         })
@@ -23604,14 +23620,16 @@ def _decode_scheduled_blend_artifact(
             "[frames,height,width,channels]." % (tuple(images.shape),))
     raw_frames = int(segment["raw_frames"])
     delivered_frames = int(segment["delivered_frames"])
-    repeated_frames = raw_frames - delivered_frames
+    effective_raw_frames = raw_frames - int(
+        segment.get("grid_padding_frames", 0) or 0)
+    repeated_frames = _head_overlap_frame_count(segment)
     if int(images.shape[0]) != raw_frames:
         raise ValueError(
             "H3 Chain blend recovery decoded %d frames for clip %d; its "
             "checkpoint requires %d." %
             (int(images.shape[0]), int(segment.get("index", 0)), raw_frames))
     start = repeated_frames - int(requested_blend)
-    scheduled = images[start:raw_frames]
+    scheduled = images[start:effective_raw_frames]
     expected = delivered_frames + int(requested_blend)
     if int(scheduled.shape[0]) != expected:
         raise RuntimeError(
