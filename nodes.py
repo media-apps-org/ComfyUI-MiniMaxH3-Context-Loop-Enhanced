@@ -970,7 +970,9 @@ class MiniMaxH3LoopTrim:
             raw_frames = shot.get("raw_frames")
             delivered_frames = shot.get("delivered_frames")
             grid_padding = shot.get("grid_padding_frames", 0)
-            if isinstance(grid_padding, bool):
+            if (isinstance(grid_padding, bool)
+                    or (isinstance(grid_padding, float)
+                        and not grid_padding.is_integer())):
                 raise ValueError(
                     "h3_motion_context: grid_padding_frames must be a "
                     "non-negative integer.")
@@ -1001,6 +1003,12 @@ class MiniMaxH3LoopTrim:
                     0, raw_frames - delivered_frames - tail_trim_frames)
                 authored_head_overlap = shot.get("head_overlap_frames")
                 if authored_head_overlap is not None:
+                    if (isinstance(authored_head_overlap, bool)
+                            or (isinstance(authored_head_overlap, float)
+                                and not authored_head_overlap.is_integer())):
+                        raise ValueError(
+                            "h3_motion_context: head_overlap_frames must be "
+                            "a non-negative integer.")
                     try:
                         authored_head_overlap = int(authored_head_overlap)
                     except (TypeError, ValueError, OverflowError) as exc:
