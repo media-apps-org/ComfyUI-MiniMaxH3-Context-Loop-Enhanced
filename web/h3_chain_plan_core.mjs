@@ -1447,7 +1447,9 @@ function sceneFrameGeometry(shot, defaultDuration, headContextFrames = 0) {
         }
         return {
             rawFrames,
-            requestedFrames: rawFrames - headContext,
+            // Exact length/frames authoring controls the raw H3 generation
+            // length. It is not a requested delivered duration.
+            requestedFrames: rawFrames,
             gridPaddingFrames: 0,
             headContextFrames: headContext,
         };
