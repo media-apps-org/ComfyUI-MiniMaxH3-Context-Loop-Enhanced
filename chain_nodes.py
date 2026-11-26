@@ -6139,14 +6139,17 @@ def _low_grid_guide_context(
             "separate its delivered frames from its incoming overlap.")
     raw_frames = _editorial_segment_raw_frames(segment)
     delivered_frames = _editorial_segment_delivered_frames(segment)
-    trim_frames = raw_frames - delivered_frames
-    if (raw_frames <= 0 or delivered_frames <= 0 or trim_frames < 0
+    head_overlap_frames = _head_overlap_frame_count(segment)
+    if (raw_frames <= 0 or delivered_frames <= 0
+            or head_overlap_frames < 0
+            or head_overlap_frames + delivered_frames > raw_frames
             or int(decoded.shape[0]) != raw_frames):
         raise ValueError(
             "H3 low-grid Guide predecessor latent decoded to %d frames, but "
             "segment metadata declares %d raw / %d delivered frames." %
             (int(decoded.shape[0]), raw_frames, delivered_frames))
-    delivered = decoded[trim_frames:trim_frames + delivered_frames]
+    delivered = decoded[
+        head_overlap_frames:head_overlap_frames + delivered_frames]
     if requested > int(delivered.shape[0]):
         raise ValueError(
             "H3 low-grid Guide requests %d context frames, but predecessor "
@@ -7249,6 +7252,10 @@ def _retime_review_plan(plan: dict[str, Any]) -> None:
     for offset, shot in enumerate(plan["shots"]):
         raw_frames = _validate_h3_length(
             shot["raw_frames"], "Shot %d length" % (offset + 1))
+        # Review length edits are exact raw H3 lengths. They intentionally
+        # clear duration-compensation padding; the normal Plan compiler will
+        # reintroduce padding when the authored duration is used again.
+        grid_padding_frames = 0
         if offset == 0:
             if external_span and anchor_mode == "head":
                 if raw_frames <= external_span:
@@ -7257,10 +7264,10 @@ def _retime_review_plan(plan: dict[str, Any]) -> None:
                         "%d-frame imported-video overlap." %
                         (raw_frames, external_span))
                 generation_start = -external_span
-                delivered_frames = raw_frames - external_span
+                head_overlap_frames = external_span
             else:
                 generation_start = 0
-                delivered_frames = raw_frames
+                head_overlap_frames = 0
             if external_span:
                 shot["external_context_frames"] = external_span
         else:
@@ -7272,10 +7279,15 @@ def _retime_review_plan(plan: dict[str, Any]) -> None:
                     (offset + 1, raw_frames, scene_context))
             if anchor_mode == "head":
                 generation_start = stitched_frames - scene_context
-                delivered_frames = raw_frames - scene_context
+                head_overlap_frames = scene_context
             else:
                 generation_start = stitched_frames
-                delivered_frames = raw_frames
+                head_overlap_frames = 0
+        delivered_frames = raw_frames - head_overlap_frames
+        shot["requested_frames"] = delivered_frames
+        shot["grid_padding_frames"] = grid_padding_frames
+        shot["head_overlap_frames"] = head_overlap_frames
+        shot["duration_compensation"] = False
         shot["generation_start_frame"] = generation_start
         shot["delivered_frames"] = delivered_frames
         shot["audio_start_seconds"] = max(0, generation_start) / float(FPS)
@@ -10909,15 +10921,18 @@ def _previous_context_frames(state: dict[str, Any], vae: Any,
 
     raw_frames = _editorial_segment_raw_frames(segment)
     delivered_frames = _editorial_segment_delivered_frames(segment)
-    trim_frames = raw_frames - delivered_frames
-    if (raw_frames <= 0 or delivered_frames <= 0 or trim_frames < 0
+    head_overlap_frames = _head_overlap_frame_count(segment)
+    if (raw_frames <= 0 or delivered_frames <= 0
+            or head_overlap_frames < 0
+            or head_overlap_frames + delivered_frames > raw_frames
             or int(decoded.shape[0]) != raw_frames):
         raise ValueError(
             "H3 chain cannot recover predecessor context: its latent decoded "
             "to %d frames but segment metadata declares %d raw / %d "
             "delivered frames." %
             (int(decoded.shape[0]), raw_frames, delivered_frames))
-    delivered = decoded[trim_frames:trim_frames + delivered_frames]
+    delivered = decoded[
+        head_overlap_frames:head_overlap_frames + delivered_frames]
     if requested > int(delivered.shape[0]):
         raise ValueError(
             "H3 chain next scene requests %d context frames, but predecessor "
@@ -18666,8 +18681,7 @@ class MiniMaxH3ChainCurrent:
         _validate_scene_resolution_boundary(plan, index)
         context_length = _shot_context_length(
             shot, int(cfg.get("context_length", 0)))
-        repeated_frames = max(
-            0, int(shot["raw_frames"]) - int(shot["delivered_frames"]))
+        repeated_frames = _head_overlap_frame_count(shot)
         video_blend_frames = min(
             repeated_frames,
             _shot_video_blend_frames(
@@ -19435,8 +19449,7 @@ class MiniMaxH3ChainSegmentSave:
                 "Wire decoded images through MiniMax H3 Context Loop Trim before "
                 "Segment Save." % (index, actual_frames, expected_frames))
 
-        repeated_frames = max(
-            0, int(shot["raw_frames"]) - int(shot["delivered_frames"]))
+        repeated_frames = _head_overlap_frame_count(shot)
         blend_frames = min(
             repeated_frames,
             _shot_video_blend_frames(
@@ -19625,18 +19638,21 @@ class MiniMaxH3ChainSegmentSave:
                         "H3 chain clip %d Loop Trim overlap audio has invalid "
                         "shape %r." %
                         (index, getattr(overlap_waveform, "shape", None)))
-                if overlap_frames != int(shot["raw_frames"]):
+                effective_raw_frames = (
+                    int(shot["raw_frames"])
+                    - int(shot.get("grid_padding_frames", 0) or 0))
+                if overlap_frames != effective_raw_frames:
                     raise ValueError(
                         "H3 chain clip %d Loop Trim overlap audio describes "
-                        "%d frames; expected %d raw frames." %
-                        (index, overlap_frames, int(shot["raw_frames"])))
+                        "%d frames; expected %d unpadded raw frames." %
+                        (index, overlap_frames, effective_raw_frames))
                 if overlap_trim != repeated_frames:
                     raise ValueError(
                         "H3 chain clip %d Loop Trim overlap audio removed %d "
                         "frames; expected %d." %
                         (index, overlap_trim, repeated_frames))
                 expected_overlap_samples = sample_boundary_from_frames(
-                    overlap_frames, sample_rate, FPS)
+                    effective_raw_frames, sample_rate, FPS)
                 if int(overlap_waveform.shape[-1]) != expected_overlap_samples:
                     raise ValueError(
                         "H3 chain clip %d Loop Trim overlap audio has %d "
