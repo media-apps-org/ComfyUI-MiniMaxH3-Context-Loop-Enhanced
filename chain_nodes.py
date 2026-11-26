@@ -5677,7 +5677,8 @@ def _h3_prefix_frame_boundary_step(frame: int) -> int | None:
 
 def _native_context_window_starts(
         raw_frames: int, delivered_frames: int, span_frames: int,
-        prefix_frames: int = 0) -> tuple[int, ...]:
+        prefix_frames: int = 0,
+        head_overlap_frames: int | None = None) -> tuple[int, ...]:
     """Return delivered-frame starts that are exact native latent crops."""
     raw_frames = int(raw_frames)
     delivered_frames = int(delivered_frames)
@@ -5699,7 +5700,11 @@ def _native_context_window_starts(
     if target_start is None or target_end is None:
         return ()
     expected_steps = target_end - target_start
-    trim_frames = raw_frames - delivered_frames
+    trim_frames = (
+        raw_frames - delivered_frames
+        if head_overlap_frames is None else int(head_overlap_frames))
+    if trim_frames < 0 or trim_frames + delivered_frames > raw_frames:
+        return ()
     starts = []
     for delivered_start in range(latest + 1):
         raw_start = trim_frames + delivered_start
@@ -5715,7 +5720,8 @@ def _native_context_window_starts(
 def _shot_visual_context_start_frame(
         shot: dict[str, Any], field: str, raw_frames: int,
         delivered_frames: int, span_frames: int,
-        prefix_frames: int = 0) -> int:
+        prefix_frames: int = 0,
+        head_overlap_frames: int | None = None) -> int:
     """Resolve one delivered-video window on H3's native latent lattice."""
     raw_frames = int(raw_frames)
     delivered_frames = int(delivered_frames)
@@ -5730,8 +5736,14 @@ def _shot_visual_context_start_frame(
         raise ValueError(
             "%s requests %d frames from a source delivering only %d." %
             (field, span_frames, delivered_frames))
+    if head_overlap_frames is None:
+        if "head_overlap_frames" in shot:
+            head_overlap_frames = int(shot["head_overlap_frames"])
+        elif "raw_frames" in shot and "delivered_frames" in shot:
+            head_overlap_frames = _head_overlap_frame_count(shot)
     starts = _native_context_window_starts(
-        raw_frames, delivered_frames, span_frames, prefix_frames)
+        raw_frames, delivered_frames, span_frames, prefix_frames,
+        head_overlap_frames)
     if not starts:
         raise ValueError(
             "%s has no native latent-aligned %d-frame window inside the "
@@ -5888,7 +5900,8 @@ def _shot_audio_context_lead_frames(
 
 def _audio_context_window_starts(
         raw_frames: int, delivered_frames: int,
-        span_frames: int) -> tuple[int, ...]:
+        span_frames: int,
+        head_overlap_frames: int | None = None) -> tuple[int, ...]:
     """Return delivered-frame starts whose audio crop has an exact duration."""
     raw_frames = int(raw_frames)
     delivered_frames = int(delivered_frames)
@@ -5896,7 +5909,11 @@ def _audio_context_window_starts(
     if (raw_frames < delivered_frames or delivered_frames < 1
             or span_frames < 1 or span_frames > delivered_frames):
         return ()
-    trim_frames = raw_frames - delivered_frames
+    trim_frames = (
+        raw_frames - delivered_frames
+        if head_overlap_frames is None else int(head_overlap_frames))
+    if trim_frames < 0 or trim_frames + delivered_frames > raw_frames:
+        return ()
     expected = int(round(span_frames / float(FPS) * AUDIO_HZ))
     starts = []
     for delivered_start in range(delivered_frames - span_frames + 1):
@@ -5911,10 +5928,16 @@ def _audio_context_window_starts(
 
 def _shot_audio_context_start_frame(
         shot: dict[str, Any], field: str, raw_frames: int,
-        delivered_frames: int, span_frames: int) -> int:
+        delivered_frames: int, span_frames: int,
+        head_overlap_frames: int | None = None) -> int:
     """Resolve one exact 40 Hz audio-latent crop in delivered-frame time."""
+    if head_overlap_frames is None:
+        if "head_overlap_frames" in shot:
+            head_overlap_frames = int(shot["head_overlap_frames"])
+        elif "raw_frames" in shot and "delivered_frames" in shot:
+            head_overlap_frames = _head_overlap_frame_count(shot)
     starts = _audio_context_window_starts(
-        raw_frames, delivered_frames, span_frames)
+        raw_frames, delivered_frames, span_frames, head_overlap_frames)
     if not starts:
         raise ValueError(
             "%s has no exact %d-frame/40 Hz audio window inside the source's "
