@@ -619,8 +619,80 @@ def main():
     assert delivered[:, 0, 0, 0].tolist() == list(range(4, 10))
     assert with_overlap[:, 0, 0, 0].tolist() == list(range(4, 10))
     assert retained == 0
-    print("trim: AV tails frame-locked; optional visual overlap is clamped and "
-          "scene state overrides the legacy Plan-default wire")
+    # Duration compensation trims H3 grid padding from the tail while
+    # independently removing the incoming repeated head. Audio delivered to
+    # Segment Save must match only the final delivered frame count.
+    padded_images = torch.arange(243, dtype=torch.float32).reshape(
+        243, 1, 1, 1)
+    padded_audio = {
+        "waveform": torch.ones((1, 2, 324_000), dtype=torch.float32),
+        "sample_rate": 32_000,
+    }
+    first_delivery_state = {
+        "index": 1,
+        "plan": {
+            "shots": [{
+                "raw_frames": 243,
+                "requested_frames": 240,
+                "grid_padding_frames": 3,
+                "head_overlap_frames": 0,
+                "delivered_frames": 240,
+                "video_blend_frames": 0,
+            }],
+            "compatibility": {"video_blend_frames": 0},
+        },
+    }
+    first_delivered, first_audio, _, first_retained = trim_node.trim(
+        padded_images, 0, padded_audio, 24.0, True,
+        state=first_delivery_state)
+    assert first_delivered.shape[0] == 240
+    assert first_retained == 0
+    assert first_delivered[:, 0, 0, 0].tolist() == list(range(240))
+    assert int(first_audio["waveform"].shape[-1]) == round(240 / 24 * 32_000)
+    assert int(first_audio["_h3_audio_with_overlap_frames"]) == 240
+    assert int(first_audio["_h3_audio_trim_frames"]) == 0
+    assert int(first_audio["_h3_audio_with_overlap_waveform"].shape[-1]) == (
+        round(240 / 24 * 32_000))
+
+    continuation_delivery_state = {
+        "index": 2,
+        "plan": {
+            "shots": [
+                {
+                    "raw_frames": 243,
+                    "requested_frames": 240,
+                    "grid_padding_frames": 3,
+                    "head_overlap_frames": 0,
+                    "delivered_frames": 240,
+                },
+                {
+                    "raw_frames": 243,
+                    "requested_frames": 212,
+                    "grid_padding_frames": 9,
+                    "head_overlap_frames": 22,
+                    "delivered_frames": 212,
+                    "video_blend_frames": 22,
+                },
+            ],
+            "compatibility": {"video_blend_frames": 22},
+        },
+    }
+    continuation_delivered, continuation_audio, continuation_overlap, retained = (
+        trim_node.trim(
+            padded_images, 22, padded_audio, 24.0, True,
+            state=continuation_delivery_state))
+    assert continuation_delivered[:, 0, 0, 0].tolist() == list(range(22, 234))
+    assert continuation_delivered.shape[0] == 212
+    assert continuation_overlap[:, 0, 0, 0].tolist() == list(range(234))
+    assert retained == 22
+    assert int(continuation_audio["waveform"].shape[-1]) == (
+        round(212 / 24 * 32_000))
+    assert int(continuation_audio["_h3_audio_with_overlap_frames"]) == 234
+    assert int(continuation_audio["_h3_audio_trim_frames"]) == 22
+    assert int(continuation_audio["_h3_audio_with_overlap_waveform"].shape[-1]) == (
+        round(234 / 24 * 32_000))
+    print("trim: separate head overlap and tail H3 padding produce frame-accurate "
+          "delivered A/V and unpadded private AV overlap")
 
     real_audio_load = chain._load_checkpoint_audio
     try:
