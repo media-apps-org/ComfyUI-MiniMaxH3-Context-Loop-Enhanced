@@ -1019,21 +1019,35 @@ def _resolve_dynamic_prompt(
     return render(text)
 
 
+def _h3_frame_grid_length(requested_frames: int) -> int:
+    """Return the smallest H3 17k+5 raw length covering requested frames."""
+    requested = max(5, int(requested_frames))
+    length = requested + (5 - requested % 17) % 17
+    if length > MAX_H3_FRAMES:
+        raise ValueError(
+            "H3 delivery requires %d raw frames after grid alignment; the "
+            "largest valid 17k+5 length is %d frames (%.6fs)." %
+            (length, MAX_H3_FRAMES, MAX_H3_FRAMES / float(FPS)))
+    return length
+
+
 def _h3_frame_length(seconds: float) -> int:
-    """Round a duration up to H3's valid 17k+5 frame grid."""
+    """Round a raw H3 generation duration up to its valid 17k+5 grid."""
     seconds = float(seconds)
     if not math.isfinite(seconds) or seconds <= 0:
         raise ValueError("H3 shot duration must be a finite positive number.")
     # Subtract a tiny tolerance so an exactly frame-aligned decimal does not
     # jump a frame because of binary floating-point representation.
     requested = max(5, int(math.ceil(seconds * FPS - 1e-9)))
-    length = requested + (5 - requested % 17) % 17
-    if length > MAX_H3_FRAMES:
-        raise ValueError(
-            "H3 shot duration %.6fs rounds to %d frames; the largest valid "
-            "17k+5 length is %d frames (%.6fs)." %
-            (seconds, length, MAX_H3_FRAMES, MAX_H3_FRAMES / float(FPS)))
-    return length
+    return _h3_frame_grid_length(requested)
+
+
+def _head_overlap_frame_count(shot: dict[str, Any]) -> int:
+    """Return only the repeated incoming head; exclude tail grid padding."""
+    raw_frames = int(shot.get("raw_frames", 0))
+    delivered_frames = int(shot.get("delivered_frames", 0))
+    padding_frames = int(shot.get("grid_padding_frames", 0) or 0)
+    return max(0, raw_frames - delivered_frames - padding_frames)
 
 
 def _validate_h3_length(length: Any, label: str) -> int:
@@ -6141,6 +6155,9 @@ def _legacy_history_contract(
             "seed": shot["seed"],
             "steps": shot["steps"],
             "raw_frames": shot["raw_frames"],
+            "requested_frames": shot.get("requested_frames", shot["delivered_frames"]),
+            "grid_padding_frames": shot.get("grid_padding_frames", 0),
+            "head_overlap_frames": _head_overlap_frame_count(shot),
             "delivered_frames": shot["delivered_frames"],
             "generation_start_frame": shot["generation_start_frame"],
         }
@@ -7612,19 +7629,29 @@ def _normalize_plan(
                 "Shot %d (%s) basic prompt is too long." % (index, shot_id))
 
         explicit_length = item.get("length", item.get("frames"))
+        grid_padding_frames = 0
         if explicit_length is None:
             duration = float(item.get("duration_seconds", default_duration))
             if not math.isfinite(duration) or duration <= 0:
                 raise ValueError(
                     "Shot %d duration must be a finite positive number." % index)
-            raw_frames = _h3_frame_length(duration)
+            requested_frames = max(
+                5, int(math.ceil(duration * FPS - 1e-9)))
+            planned_head_overlap = (
+                shot_context_length
+                if index > 1 and anchor_mode == "head" else 0)
+            raw_frames = _h3_frame_grid_length(
+                requested_frames + planned_head_overlap)
+            grid_padding_frames = (
+                raw_frames - requested_frames - planned_head_overlap)
         else:
-            raw_frames = _validate_h3_length(explicit_length,
-                                                   "Shot %d length" % index)
+            raw_frames = _validate_h3_length(
+                explicit_length, "Shot %d length" % index)
+            requested_frames = None
 
         if index == 1:
             generation_start_frame = 0
-            delivered_frames = raw_frames
+            delivered_frames = raw_frames - grid_padding_frames
         else:
             if shot_context_length and raw_frames <= shot_context_length:
                 raise ValueError(
@@ -7633,12 +7660,21 @@ def _normalize_plan(
                     (index, raw_frames, shot_context_length))
             if anchor_mode == "head":
                 generation_start_frame = stitched_frames - shot_context_length
-                delivered_frames = raw_frames - shot_context_length
+                delivered_frames = (
+                    raw_frames - shot_context_length - grid_padding_frames)
             else:
                 # `before` places context at negative coordinates, so no
                 # repeated head is delivered or trimmed from the new clip.
                 generation_start_frame = stitched_frames
-                delivered_frames = raw_frames
+                delivered_frames = raw_frames - grid_padding_frames
+        head_overlap_frames = _head_overlap_frame_count({
+            "raw_frames": raw_frames,
+            "delivered_frames": delivered_frames,
+            "grid_padding_frames": grid_padding_frames,
+        })
+        requested_frames = (
+            int(requested_frames) if requested_frames is not None
+            else int(delivered_frames))
 
         steps = int(item.get("steps", default_steps))
         if steps < 1 or steps > 10000:
@@ -7671,6 +7707,9 @@ def _normalize_plan(
             "seed": seed,
             "steps": steps,
             "raw_frames": raw_frames,
+            "requested_frames": requested_frames,
+            "grid_padding_frames": grid_padding_frames,
+            "head_overlap_frames": head_overlap_frames,
             "delivered_frames": delivered_frames,
             "generation_start_frame": generation_start_frame,
             "audio_start_seconds": generation_start_frame / float(FPS),
