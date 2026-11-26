@@ -143,7 +143,9 @@ valid JSON. Use double quotes, no comments, and no trailing commas.
 SCENE OVERRIDES
 - prompt can be one string OR an array of readable lines. The node joins array
   entries with real line breaks. Use an empty string entry for a blank line.
-- duration_seconds: requested generated duration; rounded UP to H3's 17k+5 grid.
+- duration_seconds: requested final delivered duration; converted to 24 fps frames,
+  then H3 raw generation includes incoming head context and tail grid padding.
+  Loop Trim removes both so the delivered clip matches the requested frame count.
 - length or frames: exact raw frame count; must be 5, 22, 39, 56...3592.
 - steps: sampler steps for this scene, 1–10000.
 - seed: fixed uint64 seed. Omit it for a deterministic seed from base_seed.
@@ -266,7 +268,7 @@ per-shot value > JSON defaults > H3 Chain Plan node value
 |---|---:|---|
 | `prompt` | Conditional | Scene-specific string or array of strings. It may be blank or omitted when `prompt_prefix`/`global_prompt` is non-empty. Array entries are joined with real newlines; use `""` for a blank line. The shared prefix is prepended automatically. |
 | `id` | No | Unique checkpoint identifier. Defaults to `clip_0001`, `clip_0002`, etc. Unsupported filename characters become `_`; the result is limited to 96 characters. |
-| `duration_seconds` | No | Positive requested raw generation duration. It is rounded up to a valid H3 frame count. Ignored when `length` or `frames` is present. |
+| `duration_seconds` | No | Positive requested final delivered duration. At 24 fps it is converted to a frame count; the compiler adds incoming head context and H3 tail grid padding to the raw generation length. Loop Trim removes both. Ignored when `length` or `frames` is present. |
 | `length` | No | Exact raw frame count. Must be between 5 and 3592 and satisfy `length % 17 == 5`. |
 | `frames` | No | Alias for `length`. `length` wins when both are present. |
 | `steps` | No | Sampler steps for this scene, from 1 to 10000. |
