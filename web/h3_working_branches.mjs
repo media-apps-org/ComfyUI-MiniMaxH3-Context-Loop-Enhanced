@@ -1,4 +1,4 @@
-import {parsePlanJson} from "./h3_chain_plan_core.mjs?v=0.7.12";
+import {parsePlanJson} from "./h3_chain_plan_core.mjs?v=0.7.13";
 
 // Shared request/selection protocol. Branch names are labels, never paths.
 export function workingBranchId(value) {
