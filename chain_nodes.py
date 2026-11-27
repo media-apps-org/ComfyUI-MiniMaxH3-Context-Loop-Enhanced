@@ -31612,6 +31612,8 @@ if (PromptServer is not None and web is not None and
             _project_asset_media)
 
 
+from .chain_assemble_advance import MiniMaxH3ChainAssembleAdvance
+
 CHAIN_NODE_CLASS_MAPPINGS = {
     "MiniMaxH3LipSyncOptions": MiniMaxH3LipSyncOptions,
     "MiniMaxH3GenerationProfile": MiniMaxH3GenerationProfile,
@@ -31669,6 +31671,7 @@ CHAIN_NODE_CLASS_MAPPINGS = {
     "MiniMaxH3ChainExportPNG": MiniMaxH3ChainExportPNG,
     "MiniMaxH3ChainLatentVideoAdapter": MiniMaxH3ChainLatentVideoAdapter,
     "MiniMaxH3ChainAssemble": MiniMaxH3ChainAssemble,
+    "MiniMaxH3ChainAssembleAdvance": MiniMaxH3ChainAssembleAdvance,
 }
 
 scope_nodes(CHAIN_NODE_CLASS_MAPPINGS)
@@ -31737,4 +31740,5 @@ CHAIN_NODE_DISPLAY_NAME_MAPPINGS = {
     "MiniMaxH3ChainLatentVideoAdapter": (
         "MiniMax H3 Full-Chain Latent Video Adapter"),
     "MiniMaxH3ChainAssemble": "MiniMax H3 Context Loop Assemble",
+    "MiniMaxH3ChainAssembleAdvance": "MiniMax H3 Context Loop Assemble (Advanced Multitrack)",
 }
